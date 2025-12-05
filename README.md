@@ -2,8 +2,7 @@
 ### A Complete Demo of REST + WebSocket Integration using `tradehubgo`
 
 ![Go Version](https://img.shields.io/badge/Go-1.20%2B-blue)
-![Status](https://img.shields.io/badge/Status-Stable-brightgreen)
-![License](https://img.shields.io/badge/License-MIT-yellow)
+![Status](https://img.shields.io/badge/Status-Test-yellow)
 
 This project provides a **full working demonstration** of how to integrate with the  
 **TradeSync / TradeHub Go SDK** (`github.com/krishna-codifi/tradehubgo`).
