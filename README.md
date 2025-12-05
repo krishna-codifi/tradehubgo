@@ -224,17 +224,3 @@ The feed handler prints:
 
 ---
 
-## 🛠 Extending This Project
-
-You can easily add:
-
-- Automated trading strategies  
-- Portfolio risk calculator  
-- GTT-based rebalancing  
-- Logging with Zap / ZeroLog  
-- Cobra CLI commands  
-- REST + WS integration tests  
-
-Just ask if you'd like templates.
-
----
