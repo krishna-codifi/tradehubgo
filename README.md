@@ -238,15 +238,3 @@ You can easily add:
 Just ask if you'd like templates.
 
 ---
-
-## ❓ Need Help?
-
-If you'd like, I can generate:
-
-- Documentation for `tradesync.go` and `ws.go`
-- UML sequence diagrams
-- Example unit tests
-- A simplified "minimal main.go"
-- A Dockerfile for deploying the sample
-
-Happy to assist!
