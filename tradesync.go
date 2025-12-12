@@ -274,14 +274,14 @@ func runtimeGOOS() string {
 // ------------------------- config & settings (from config & settings) -------------------------
 
 const (
+	BaseURL               = "https://a3.aliceblueonline.com/"
 	ModuleUserAgentPrefix = "Codifi API Connect - Go Lib "
 	DefaultVersion        = "1.0.0-go"
 )
 
 var (
-	BaseURL            = "https://a3.aliceblueonline.com/"
 	APIName            = "Codifi ProTrade - Go Library"
-	ContractBaseURL    = "https://v2api.aliceblueonline.com/restpy/static/contract_master/%s.csv"
+	ContractBaseURL    = "https://v2api.aliceblueonline.com/restpy/static/contract_master/"
 	GetVendorSession   = "open-api/od/v1/vendor/getUserDetails"
 	GetProfile         = "open-api/od/v1/profile/"
 	GetFunds           = "open-api/od/v1/limits/"
@@ -597,6 +597,7 @@ func (th *TradeHub) GetContractMaster(exchange string) (map[string]interface{}, 
 		}
 		for _, c := range candidates {
 			url := th.BaseURLContract + c
+			fmt.Println("URL: ", url)
 			resp, err := http.Get(url)
 			if err != nil {
 				continue
