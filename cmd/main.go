@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"time"
 
-	tradesync "github.com/krishna-codifi/tradehubgo"
+	tradesync "github.com/krishna-codifi/tradehubgo/tradesync"
+	"github.com/tidwall/gjson"
 )
 
 // writeJSONToFile pretty-prints data to a JSON file (data may be any value).
@@ -46,7 +48,6 @@ func main() {
 	userFlag := flag.String("user", "", "User ID (or set USER_ID env)")
 	authFlag := flag.String("auth", "", "Auth code (or set AUTH_CODE env)")
 	secretFlag := flag.String("secret", "", "Secret key (or set SECRET_KEY env)")
-	apiKeyFlag := flag.String("apikey", "", "API Key for Websocket (or set API_KEY env)")
 
 	// Action toggles
 	allFlag := flag.Bool("all", false, "Enable all actions")
@@ -110,19 +111,13 @@ func main() {
 		secretKey = os.Getenv("SECRET_KEY")
 	}
 
-	apiKey := *apiKeyFlag
-	if apiKey == "" {
-		apiKey = os.Getenv("API_KEY")
-	}
-
 	// ** For testing purposes, you can hardcode credentials here:
 	// userID = ""
 	// authCode = ""
 	// secretKey = ""
-	// apiKey = "" // Websocket API Key
-
-	if userID == "" || authCode == "" || secretKey == "" || apiKey == "" {
-		fmt.Println("Warning: USER_ID/AUTH_CODE/SECRET_KEY/API_KEY not fully provided. Session requests may fail.")
+	
+	if userID == "" || authCode == "" || secretKey == "" {
+		fmt.Println("Warning: USER_ID/AUTH_CODE/SECRET_KEY not fully provided. Session requests may fail.")
 	}
 
 	// Storage path definition
@@ -145,10 +140,14 @@ func main() {
 	sessionResp, err := trade.GetSessionID("", "")
 	if err != nil {
 		fmt.Println("Get Session ID error:", err)
+		return
 	} else {
 		fmt.Printf("Session: %+v\n\n\n", sessionResp)
 		saveResult(storageDir, fmt.Sprintf("Session_%s.json", userID), sessionResp)
 	}
+
+	sessionID := fmt.Sprintf("%v", sessionResp["userSession"])
+	fmt.Println("Using Session ID::::::::::::::", sessionID)
 
 	// 2) Get Contract Master files
 	if *getCM {
@@ -522,132 +521,138 @@ func main() {
 	// -------------------------
 	// Websocket flow (LTP subscription)
 	// -------------------------
-	fmt.Println("\n--- Websocket flow ---")
-	var LTP float64
-	socketOpen := make(chan struct{})
-	subscribeFlag := false
-	var subscribeList []tradesync.InstrumentWS
 
-	client := tradesync.SetCredentials(userID, apiKey)
-	// Get session ID
-	fmt.Println("Get Session ID for Websocket...")
-	resp, err := client.GetSessionID()
+	// ---------------------------------------------------------
+	// Create + Invalidate WS session
+	// ---------------------------------------------------------
+	fmt.Println("\n== Invalidate & Create WS Session ==")
+
+	resp, err := tradesync.InvalidateWebSocketSession(userID, sessionID)
 	if err != nil {
-		fmt.Println("GetSessionID error:", err)
-		pretty(resp)
-		return
+		log.Fatalf("InvalidateWebSocketSession error: %v", err)
 	}
-	pretty(resp)
+	fmt.Println("Invalidate Response:", resp)
 
-	socketOpenCb := func() {
-		fmt.Println("Connected")
-		// signal that socket is open
-		select {
-		case <-socketOpen:
-			// already signaled
-		default:
-			close(socketOpen)
+	resp, err = tradesync.CreateWebSocketSession(userID, sessionID)
+	if err != nil {
+		log.Fatalf("CreateWebSocketSession error: %v", err)
+	}
+	fmt.Println("CreateWS Response:", resp)
+
+	// ---------------------------------------------------------
+	// CONNECT TO WEBSOCKET
+	// ---------------------------------------------------------
+
+	fmt.Println("\n== Connecting to WebSocket ==")
+	wsConn, err := tradesync.ConnectWS(sessionID, userID)
+	if err != nil {
+		log.Fatalf("WebSocket connect error: %v", err)
+	}
+	defer tradesync.Close(wsConn)
+
+	// ---------------------------------------------------------
+	// Set up context, dispatcher (single reader) & keepalive
+	// ---------------------------------------------------------
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// 1 reader ONLY — safe reading
+	dispatcher := tradesync.StartDispatcher(ctx, wsConn, 512)
+
+	// pings + JSON heartbeat every 25s
+	keepAliveStatus := make(chan string, 10)
+	go tradesync.KeepAlive(ctx, wsConn, tradesync.PingInterval, true, keepAliveStatus)
+	go func() {
+		for msg := range keepAliveStatus {
+			log.Println(" *** KeepAlive:", msg)
 		}
-		if subscribeFlag && len(subscribeList) > 0 {
-			if err := client.Subscribe(subscribeList); err != nil {
-				fmt.Println("subscribe error:", err)
+	}()
+
+	// ---------------------------------------------------------
+	// MESSAGE CONSUMER (PARSES USING gjson)
+	// ---------------------------------------------------------
+
+	go func() {
+		for raw := range dispatcher.Ch {
+			t := gjson.Get(raw, "t").String()
+
+			switch t {
+			case "tk", "dk":
+				// acknowledgment
+				fmt.Println("ACK:", raw)
+
+			case "tf":
+				// tick feed
+				fmt.Println("FEED:", raw)
+
+			case "ck":
+				// login confirm (already handled earlier)
+				fmt.Println("LOGIN OK:", raw)
+
+			default:
+				fmt.Println("OTHER:", raw)
 			}
 		}
+	}()
+
+	// ---------------------------------------------------------
+	// SUBSCRIBE TO MARKET DATA
+	// ---------------------------------------------------------
+
+	fmt.Println("\n== Subscribing to Market Data ==")
+	marketSymbols := "NSE|26000#NSE|26009#CDS|5596#NSE|13#NSE|11536#NSE|26037"
+
+	if err := tradesync.SubscribeMarketData(wsConn, marketSymbols); err != nil {
+		log.Fatalf("SubscribeMarketData: %v", err)
 	}
 
-	socketCloseCb := func() {
-		fmt.Println("Closed")
-		LTP = 0
-	}
-
-	socketErrorCb := func(err error) {
-		fmt.Println("Error :", err)
-		LTP = 0
-	}
-
-	feedDataCb := func(msg []byte) {
-		var fm map[string]interface{}
-		if err := json.Unmarshal(msg, &fm); err != nil {
-			// Not a map - print raw
-			fmt.Println("Feed (raw):", string(msg))
-			return
-		}
-		if t, ok := fm["t"].(string); ok && t == "ck" {
-			fmt.Printf("Connection Acknowledgement status :%v (Websocket Connected)\n", fm["s"])
-			subscribeFlag = true
-			fmt.Println("subscribe_flag :", subscribeFlag)
-			return
-		}
-		if t, ok := fm["t"].(string); ok && t == "tk" {
-			fmt.Println("Token Acknowledgement status :", fm)
-			return
-		}
-		fmt.Println("Feed :", fm)
-		if lp, ok := fm["lp"]; ok {
-			switch v := lp.(type) {
-			case float64:
-				LTP = v
-			case int:
-				LTP = float64(v)
-			case string:
-				// string parse
-			}
-
-			fmt.Println("Current LTP:", LTP)
-		}
-	}
-
-	// attach callbacks
-	client.OnOpen = socketOpenCb
-	client.OnClose = socketCloseCb
-	client.OnError = socketErrorCb
-	client.SubscribeHandler = func(msg []byte) {
-		feedDataCb(msg)
-	}
-
-	// start websocket in background
-	if err := client.StartWebsocket(true, false); err != nil {
-		fmt.Println("StartWebsocket error:", err)
-	} else {
-		// wait until open
-		select {
-		case <-socketOpen:
-			fmt.Println("socket opened")
-		case <-time.After(10 * time.Second):
-			fmt.Println("socket open timeout")
-		}
-	}
-
-	// subscribe to INDICES token 26000
-	instIdx, err := client.GetInstrumentByTokenWS("INDICES", "26000")
-	if err != nil {
-		fmt.Println("GetInstrumentByToken error:", err)
-	} else {
-		subscribeList = []tradesync.InstrumentWS{instIdx}
-		if err := client.Subscribe(subscribeList); err != nil {
-			fmt.Println("Subscribe error:", err)
-		} else {
-			fmt.Println("Subscribed to INDICES 26000: ", subscribeList)
-		}
-	}
-
-	fmt.Println(time.Now())
+	fmt.Println("Receiving market data for 10 seconds...")
 	time.Sleep(10 * time.Second)
-	fmt.Println(time.Now())
 
-	// stop websocket
-	client.StopWebsocket()
-	time.Sleep(10 * time.Second)
-	fmt.Println(time.Now())
+	// unsubscribe
+	tradesync.UnsubscribeMarketData(wsConn, marketSymbols)
 
-	// reconnect websocket
-	if err := client.StartWebsocket(true, false); err != nil {
-		fmt.Println("StartWebsocket (reconnect) error:", err)
+	// ---------------------------------------------------------
+	// SUBSCRIBE TO DEEP DATA
+	// ---------------------------------------------------------
+
+	fmt.Println("\n== Subscribing to Depth Data ==")
+	deepSymbols := "NSE|14428"
+
+	if err := tradesync.SubscribeDepthData(wsConn, deepSymbols); err != nil {
+		log.Fatalf("SubscribeDepthData error: %v", err)
 	}
 
-	// keep program until Ctrl+C
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-	<-ctx.Done()
-	fmt.Println("exiting")
+	fmt.Println("Receiving Depth data for 10 seconds...")
+	time.Sleep(10 * time.Second)
+
+	// unsubscribe
+	tradesync.UnsubscribeDepthData(wsConn, deepSymbols)
+
+	// ---------------------------------------------------------
+	// Heartbeat run (keepalive already running)
+	// ---------------------------------------------------------
+
+	fmt.Println("\n== Heartbeat Running for 120 sec ==")
+	time.Sleep(120 * time.Second)
+
+	// ---------------------------------------------------------
+	// CLEAN EXIT
+	// ---------------------------------------------------------
+
+	fmt.Println("Waiting for Ctrl+C or 3 seconds timeout...")
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt)
+
+	select {
+	case <-sig:
+		fmt.Println("Interrupt received")
+	case <-time.After(3 * time.Second):
+		fmt.Println("Timeout — exiting")
+	}
+
+	cancel()
+	time.Sleep(300 * time.Millisecond)
+	fmt.Println("Exit complete")
 }
