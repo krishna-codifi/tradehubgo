@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"time"
 
-	tradesync "github.com/krishna-codifi/tradehubgo/tradesync"
+	tradesync "github.com/krishna-codifi/tradehubgo"
 	"github.com/tidwall/gjson"
 )
 
